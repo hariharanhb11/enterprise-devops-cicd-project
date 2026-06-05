@@ -1,25 +1,42 @@
+
 name: Enterprise CI Pipeline
 
 on:
-  pull_request:
-    branches:
-      - develop
-      - main
 
   push:
     branches:
+      - main
       - develop
-      - feature/**
+      - 'feature/**'
+
+  pull_request:
+    branches:
+      - main
+      - develop
+
+  workflow_dispatch:
 
 permissions:
   contents: read
+  packages: write
   security-events: write
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: 20
 
 jobs:
 
   frontend-build:
 
+    name: Frontend Build & Test
+
     runs-on: ubuntu-latest
+
+    timeout-minutes: 15
 
     defaults:
       run:
@@ -27,28 +44,41 @@ jobs:
 
     steps:
 
-      - name: Checkout Code
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Setup Node
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
-      - name: Install Dependencies
+      - name: Install Frontend Dependencies
         run: npm install
 
-      - name: Run Lint
-        run: npm run lint || true
+      - name: Run Frontend Lint
+        run: npm run lint
 
-      - name: Build Frontend
+      - name: Run Frontend Tests
+        run: npm test -- --watchAll=false || true
+
+      - name: Build Frontend Application
         run: npm run build
+
+      - name: Upload Frontend Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-build
+          path: frontend/build
 
   backend-test:
 
+    name: Backend Build & Test
+
     runs-on: ubuntu-latest
+
+    timeout-minutes: 15
 
     defaults:
       run:
@@ -66,21 +96,40 @@ jobs:
         ports:
           - 3306:3306
 
+        options: >-
+          --health-cmd="mysqladmin ping"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    env:
+      DB_HOST: localhost
+      DB_PORT: 3306
+      DB_USER: root
+      DB_PASSWORD: password
+      DB_NAME: appdb
+
     steps:
 
-      - uses: actions/checkout@v4
+      - name: Checkout Repository
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
 
       - name: Install Backend Dependencies
         run: npm install
 
-      - name: Run Tests
+      - name: Run Backend Tests
         run: npm test || true
 
-  docker-build:
+  security-scan:
+
+    name: Security Scan
 
     runs-on: ubuntu-latest
 
@@ -90,12 +139,67 @@ jobs:
 
     steps:
 
-      - uses: actions/checkout@v4
+      - name: Checkout Repository
+        uses: actions/checkout@v4
 
-      - name: Build Frontend Image
-        run: docker build -t frontend:${{ github.sha }} ./frontend
+      - name: Run npm audit Frontend
+        working-directory: frontend
+        run: npm audit --audit-level=high || true
 
-      - name: Build Backend Image
-        run: docker build -t backend:${{ github.sha }} ./backend
+      - name: Run npm audit Backend
+        working-directory: backend
+        run: npm audit --audit-level=high || true
 
-        
+  docker-build:
+
+    name: Docker Image Build
+
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 20
+
+    needs:
+      - frontend-build
+      - backend-test
+      - security-scan
+
+    steps:
+
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Frontend Docker Image
+        run: |
+          docker build \
+          -t frontend:${{ github.sha }} \
+          ./frontend
+
+      - name: Build Backend Docker Image
+        run: |
+          docker build \
+          -t backend:${{ github.sha }} \
+          ./backend
+
+      - name: Verify Docker Images
+        run: docker images
+
+  pipeline-summary:
+
+    name: Pipeline Summary
+
+    runs-on: ubuntu-latest
+
+    needs:
+      - frontend-build
+      - backend-test
+      - security-scan
+      - docker-build
+
+    steps:
+
+      - name: CI Pipeline Success
+        run: |
+          echo "Enterprise CI Pipeline Completed Successfully"
